@@ -3,8 +3,8 @@ import cv2
 import numpy as np
 import tempfile
 import os
-import time   # ← 新增，用于文件等待
 from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.video.VideoClip import ImageSequenceClip
 from moviepy.audio.AudioClip import CompositeAudioClip, concatenate_audioclips
 
 # ---------- 页面配置 ----------
@@ -80,7 +80,7 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     return rect
 
-# ---------- 修正后的核心合成函数（绿幕/素材不再反了） ----------
+# ---------- 核心合成函数（不变） ----------
 def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_pts):
     width, height = frame_green.shape[1], frame_green.shape[0]
     bg_float = frame_green.astype(np.float32)
@@ -202,12 +202,10 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         fps = cap_green.get(cv2.CAP_PROP_FPS)
                         width = int(cap_green.get(cv2.CAP_PROP_FRAME_WIDTH))
                         height= int(cap_green.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        silent_path = os.path.join(tempfile.gettempdir(), "silent_video.mp4")
-                        if os.path.exists(silent_path): os.remove(silent_path)
-                        fourcc = cv2.VideoWriter_fourcc(*'avc1')
-                        out = cv2.VideoWriter(silent_path, fourcc, fps, (width, height))
+                        
                         last_valid_pts = None
                         history_pts = []
+                        frames = []
                         while cap_green.isOpened():
                             ret_g, frame_g = cap_green.read()
                             if not ret_g: break
@@ -217,45 +215,39 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                                 ret_m, frame_m = cap_game.read()
                             if frame_m is None: frame_m = np.zeros_like(frame_g)
                             processed, last_valid_pts, history_pts = process_core_frame_master(frame_g, frame_m, last_valid_pts, history_pts)
-                            out.write(processed)
-                        cap_green.release(); cap_game.release(); out.release()
+                            # 转换为RGB (moviepy需要)
+                            processed_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+                            frames.append(processed_rgb)
+                        cap_green.release(); cap_game.release()
                         
-                        # === 核心修复：等待文件写入完成 ===
-                        max_wait = 10  # 最多等 10 秒
-                        waited = 0
-                        while not os.path.exists(silent_path) and waited < max_wait:
-                            time.sleep(0.5)
-                            waited += 0.5
-                        if not os.path.exists(silent_path):
-                            st.error("视频文件写入失败，请稍后重试")
-                            st.stop()
-                        # === 等待结束 ===
+                        # 使用帧序列直接生成视频（无需临时文件）
+                        video_clip = ImageSequenceClip(frames, fps=fps)
                         
+                        # 音频处理
                         audio = None
                         game_clip = None
                         try:
                             game_clip = VideoFileClip(st.session_state.game_cache_path)
-                            if game_clip.audio is not None: audio = game_clip.audio
+                            if game_clip.audio is not None:
+                                audio = game_clip.audio
                         except Exception as e: pass
                         
                         output_final_path = os.path.join(tempfile.gettempdir(), "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
-                        final_clip = VideoFileClip(silent_path)
                         if audio is not None:
-                            final_clip = final_clip.with_audio(audio)
-                            final_clip = final_clip.with_duration(min(final_clip.duration, audio.duration))
+                            video_clip = video_clip.with_audio(audio)
+                            video_clip = video_clip.with_duration(min(video_clip.duration, audio.duration))
                         
-                        final_clip.write_videofile(
+                        video_clip.write_videofile(
                             output_final_path,
                             codec='libx264',
                             audio_codec='aac' if audio is not None else None,
                             logger=None
                         )
-                        final_clip.close()
+                        video_clip.close()
                         if audio is not None: audio.close()
                         if game_clip is not None: game_clip.close()
-                        if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()
                         st.success("🎉 自动化抗抖完全体全片合成完毕！")

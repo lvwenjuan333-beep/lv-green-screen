@@ -4,6 +4,7 @@ import numpy as np
 import tempfile
 import os
 from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.audio.AudioClip import CompositeAudioClip, concatenate_audioclips
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -78,34 +79,27 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     return rect
 
-# ---------- 修正后的核心合成函数（绿幕/素材不再反了） ----------
+# ---------- 核心合成函数 ----------
 def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_pts):
     width, height = frame_green.shape[1], frame_green.shape[0]
     bg_float = frame_green.astype(np.float32)
     
-    # 1. 用 HSV 检测绿色区域（绿幕屏幕）
     hsv = cv2.cvtColor(frame_green, cv2.COLOR_BGR2HSV)
     lower_green = np.array([35, 40, 40])
     upper_green = np.array([85, 255, 255])
     mask_green = cv2.inRange(hsv, lower_green, upper_green).astype(np.float32) / 255.0
     
-    # 2. 肤色保护：防止手指/手部被误当绿幕
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
     mask_skin = cv2.inRange(hsv, lower_skin, upper_skin).astype(np.float32) / 255.0
     
-    # 3. 最终绿幕掩膜（绿色区域且非肤色）
     mask_green_safe = np.clip(mask_green - mask_skin * skin_protect, 0, 1)
-    
-    # alpha: 绿幕区域为0（替换成游戏），人手/背景为1（保留）
     alpha = 1.0 - mask_green_safe
-    # 羽化
     blur_size = int(soft_falloff) * 2 + 1
     alpha = cv2.GaussianBlur(alpha, (blur_size, blur_size), 0)
     alpha = np.clip(alpha, 0.0, 1.0).astype(np.float32)
     
-    # 4. 屏幕区域轮廓检测（用于透视映射）
-    mask_binary = (alpha < 0.5).astype(np.uint8) * 255   # 绿幕区域为白色
+    mask_binary = (alpha < 0.5).astype(np.uint8) * 255
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     mask_cleaned = cv2.morphologyEx(mask_binary, cv2.MORPH_CLOSE, kernel)
     
@@ -120,7 +114,6 @@ def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_p
             box = cv2.boxPoints(rect)
             detected_pts = order_points(np.array(box, dtype=np.float32))
 
-    # 5. 角点稳定（同原逻辑）
     if detected_pts is not None:
         if last_valid_pts is not None:
             move_dist = np.mean(np.linalg.norm(detected_pts - last_valid_pts, axis=1))
@@ -146,7 +139,6 @@ def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_p
             M = cv2.getPerspectiveTransform(pts_game, target_pts)
         warped_game = cv2.warpPerspective(frame_game, M, (width, height)).astype(np.float32)
         
-        # 6. 手指泛绿洗白（原逻辑，应用在边缘区域）
         b_ch, g_ch, r_ch = cv2.split(frame_green.astype(np.float32))
         max_g = (r_ch + b_ch) * 0.49
         spill_intensity = np.maximum(0.0, g_ch - max_g)
@@ -154,12 +146,45 @@ def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_p
         g_corrected = g_ch - (spill_intensity * spill_suppress * edge_zone)
         bg_despilled = np.clip(cv2.merge([b_ch, g_corrected, r_ch]), 0, 255)
         
-        # 7. 合成：游戏画面覆盖绿幕区域，人手/背景保留
         alpha_3d = cv2.merge([alpha] * 3)
         final_frame = warped_game * (1.0 - alpha_3d) + bg_despilled * alpha_3d
         return np.clip(final_frame, 0, 255).astype(np.uint8), last_valid_pts, history_pts
         
     return frame_green, last_valid_pts, history_pts
+
+# ---------- 音频工具 ----------
+def safe_extract_audio(path):
+    try:
+        clip = VideoFileClip(path)
+        if clip.audio is not None:
+            audio = clip.audio
+            clip.close()
+            return audio
+        clip.close()
+        return None
+    except:
+        return None
+
+def loop_audio(audio_clip, duration):
+    if audio_clip is None or duration <= 0:
+        return None
+    full_dur = audio_clip.duration
+    n_full = int(duration // full_dur)
+    remainder = duration % full_dur
+    clips = []
+    for _ in range(n_full):
+        clips.append(audio_clip)
+    if remainder > 0:
+        clips.append(audio_clip.set_duration(remainder))
+    if not clips:
+        return None
+    return clips[0] if len(clips) == 1 else concatenate_audioclips(clips)
+
+def set_volume(audio_clip, vol):
+    try:
+        return audio_clip.fx.volumex(vol)
+    except:
+        return audio_clip
 
 # ---------- 主界面 ----------
 col1, col2 = st.columns([5, 5], gap="large")
@@ -210,6 +235,7 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         fps = cap_green.get(cv2.CAP_PROP_FPS)
                         width = int(cap_green.get(cv2.CAP_PROP_FRAME_WIDTH))
                         height= int(cap_green.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        green_duration = int(cap_green.get(cv2.CAP_PROP_FRAME_COUNT)) / fps if fps > 0 else 0
                         silent_path = os.path.join(tempfile.gettempdir(), "silent_video.mp4")
                         if os.path.exists(silent_path): os.remove(silent_path)
                         fourcc = cv2.VideoWriter_fourcc(*'avc1')
@@ -228,30 +254,42 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             out.write(processed)
                         cap_green.release(); cap_game.release(); out.release()
                         
-                        audio = None
-                        game_clip = None
-                        try:
-                            game_clip = VideoFileClip(st.session_state.game_cache_path)
-                            if game_clip.audio is not None: audio = game_clip.audio
-                        except Exception as e: pass
+                        # 等待文件写入完成
+                        while not os.path.exists(silent_path):
+                            pass
+                        
+                        # 音频处理
+                        green_audio = safe_extract_audio(st.session_state.green_cache_path)
+                        game_audio = safe_extract_audio(st.session_state.game_cache_path)
+                        clips = []
+                        if green_audio: clips.append(set_volume(green_audio, 1.0))  # 音量固定为1，如需调节可加侧边栏
+                        if game_audio:
+                            looped = loop_audio(game_audio, green_duration)
+                            if looped: clips.append(set_volume(looped, 1.0))
+                        mixed_audio = None
+                        if len(clips) == 1:
+                            mixed_audio = clips[0]
+                        elif len(clips) >= 2:
+                            mixed_audio = CompositeAudioClip(clips)
+                        else:
+                            st.warning("两个素材都无音轨，导出视频将为无声。")
                         
                         output_final_path = os.path.join(tempfile.gettempdir(), "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
                         final_clip = VideoFileClip(silent_path)
-                        if audio is not None:
-                            final_clip = final_clip.with_audio(audio)
-                            final_clip = final_clip.with_duration(min(final_clip.duration, audio.duration))
+                        if mixed_audio is not None:
+                            final_clip = final_clip.with_audio(mixed_audio)
+                            final_clip = final_clip.with_duration(min(final_clip.duration, mixed_audio.duration))
                         
                         final_clip.write_videofile(
                             output_final_path,
                             codec='libx264',
-                            audio_codec='aac' if audio is not None else None,
+                            audio_codec='aac' if mixed_audio is not None else None,
                             logger=None
                         )
                         final_clip.close()
-                        if audio is not None: audio.close()
-                        if game_clip is not None: game_clip.close()
+                        for c in clips: c.close()
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()

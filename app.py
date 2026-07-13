@@ -4,7 +4,7 @@ import numpy as np
 import tempfile
 import os
 import subprocess
-from moviepy.video.io.VideoFileClip import VideoFileClip
+import sys  # 引入系统判断库
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -158,7 +158,11 @@ with col1:
     uploaded_green = st.file_uploader("手持高动态实拍绿幕素材 (MP4/MOV)", type=["mp4", "mov"])
     uploaded_game = st.file_uploader("游戏玩法高帧率录屏 (MP4)", type=["mp4"])
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
+# 基于当前平台自动决定使用临时目录还是当前文件夹
+if sys.platform.startswith('win'):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+else:
+    base_dir = tempfile.gettempdir()  # 云端/Linux 自动使用系统临时区
 
 if uploaded_green is not None:
     path_g = os.path.join(base_dir, "cache_green.mp4")
@@ -202,9 +206,8 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         cap_green = cv2.VideoCapture(st.session_state.green_cache_path)
                         cap_game  = cv2.VideoCapture(st.session_state.game_cache_path)
                         
-                        # 核心防对齐修改点：这里必须获取最精准的原片实际帧率
                         fps = cap_green.get(cv2.CAP_PROP_FPS)
-                        if fps < 10 or fps > 120: fps = 30.0  # 异常安全保护
+                        if fps < 10 or fps > 120: fps = 30.0
                         
                         width = int(cap_green.get(cv2.CAP_PROP_FRAME_WIDTH))
                         height= int(cap_green.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -229,38 +232,32 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             out.write(processed)
                         cap_green.release(); cap_game.release(); out.release()
                         
-                        # ---------- 核心安全对齐升级：FFmpeg 无损底层封装合并 ----------
                         output_final_path = os.path.join(base_dir, "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
-                        # 直接调用系统的 ffmpeg (moviepy自带)，无损抽取绿幕原素材的音频，并强行和新生成的视频轨道贴合
-                        # -shortest 参数可以保证音视频长度一致，防止尾部音画拉长。
                         cmd = [
                             'ffmpeg', '-y',
-                            '-i', silent_path,                             # 输入1：抠像完的无声视频
-                            '-i', st.session_state.green_cache_path,       # 输入2：绿幕原素材（带声音）
-                            '-map', '0:v:0',                               # 取输入1的视频轨
-                            '-map', '1:a:0',                               # 取输入2的音频轨
-                            '-c:v', 'libx264',                             # 重新压制视频为标准H264
-                            '-pix_fmt', 'yuv420p',                         # 确保手机/网页完美兼容
-                            '-c:a', 'aac',                                 # 音频转为标准AAC
-                            '-shortest',                                   # 哪边短以哪边为准截止，防止音画异步
+                            '-i', silent_path,
+                            '-i', st.session_state.green_cache_path,
+                            '-map', '0:v:0',
+                            '-map', '1:a:0',
+                            '-c:v', 'libx264',
+                            '-pix_fmt', 'yuv420p',
+                            '-c:a', 'aac',
+                            '-shortest',
                             output_final_path
                         ]
                         
-                        try:
-                            # 隐藏控制台黑窗口运行
+                        # ---------- 跨平台安全运行修改点 ----------
+                        if sys.platform.startswith('win'):
+                            # 如果是 Windows，配置隐藏 CMD 黑窗口参数
                             startupinfo = subprocess.STARTUPINFO()
                             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo, check=True)
-                        except Exception as ffmpeg_err:
-                            # 备用轻量级合并（防止极个别素材没有音频轨导致FFmpeg报错）
-                            cmd_fallback = [
-                                'ffmpeg', '-y', '-i', silent_path, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', output_final_path
-                            ]
-                            subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+                        else:
+                            # 如果是 Linux/Mac 云端，不需要配置 startupinfo
+                            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
                         
-                        # 清理过度临时文件
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()

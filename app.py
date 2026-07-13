@@ -78,34 +78,27 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     return rect
 
-# ---------- 修正后的核心合成函数（绿幕/素材不再反了） ----------
 def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_pts):
     width, height = frame_green.shape[1], frame_green.shape[0]
     bg_float = frame_green.astype(np.float32)
     
-    # 1. 用 HSV 检测绿色区域（绿幕屏幕）
     hsv = cv2.cvtColor(frame_green, cv2.COLOR_BGR2HSV)
     lower_green = np.array([35, 40, 40])
     upper_green = np.array([85, 255, 255])
     mask_green = cv2.inRange(hsv, lower_green, upper_green).astype(np.float32) / 255.0
     
-    # 2. 肤色保护：防止手指/手部被误当绿幕
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
     mask_skin = cv2.inRange(hsv, lower_skin, upper_skin).astype(np.float32) / 255.0
     
-    # 3. 最终绿幕掩膜（绿色区域且非肤色）
     mask_green_safe = np.clip(mask_green - mask_skin * skin_protect, 0, 1)
     
-    # alpha: 绿幕区域为0（替换成游戏），人手/背景为1（保留）
     alpha = 1.0 - mask_green_safe
-    # 羽化
     blur_size = int(soft_falloff) * 2 + 1
     alpha = cv2.GaussianBlur(alpha, (blur_size, blur_size), 0)
     alpha = np.clip(alpha, 0.0, 1.0).astype(np.float32)
     
-    # 4. 屏幕区域轮廓检测（用于透视映射）
-    mask_binary = (alpha < 0.5).astype(np.uint8) * 255   # 绿幕区域为白色
+    mask_binary = (alpha < 0.5).astype(np.uint8) * 255
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     mask_cleaned = cv2.morphologyEx(mask_binary, cv2.MORPH_CLOSE, kernel)
     
@@ -120,7 +113,6 @@ def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_p
             box = cv2.boxPoints(rect)
             detected_pts = order_points(np.array(box, dtype=np.float32))
 
-    # 5. 角点稳定（同原逻辑）
     if detected_pts is not None:
         if last_valid_pts is not None:
             move_dist = np.mean(np.linalg.norm(detected_pts - last_valid_pts, axis=1))
@@ -146,7 +138,6 @@ def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_p
             M = cv2.getPerspectiveTransform(pts_game, target_pts)
         warped_game = cv2.warpPerspective(frame_game, M, (width, height)).astype(np.float32)
         
-        # 6. 手指泛绿洗白（原逻辑，应用在边缘区域）
         b_ch, g_ch, r_ch = cv2.split(frame_green.astype(np.float32))
         max_g = (r_ch + b_ch) * 0.49
         spill_intensity = np.maximum(0.0, g_ch - max_g)
@@ -154,7 +145,6 @@ def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_p
         g_corrected = g_ch - (spill_intensity * spill_suppress * edge_zone)
         bg_despilled = np.clip(cv2.merge([b_ch, g_corrected, r_ch]), 0, 255)
         
-        # 7. 合成：游戏画面覆盖绿幕区域，人手/背景保留
         alpha_3d = cv2.merge([alpha] * 3)
         final_frame = warped_game * (1.0 - alpha_3d) + bg_despilled * alpha_3d
         return np.clip(final_frame, 0, 255).astype(np.uint8), last_valid_pts, history_pts
@@ -168,14 +158,19 @@ with col1:
     uploaded_green = st.file_uploader("手持高动态实拍绿幕素材 (MP4/MOV)", type=["mp4", "mov"])
     uploaded_game = st.file_uploader("游戏玩法高帧率录屏 (MP4)", type=["mp4"])
 
+# 基于当前目录创建安全的临时文件路径
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
 if uploaded_green is not None:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    tfile.write(uploaded_green.getbuffer())
-    st.session_state.green_cache_path = tfile.name
+    path_g = os.path.join(base_dir, "cache_green.mp4")
+    with open(path_g, "wb") as f:
+        f.write(uploaded_green.getbuffer())
+    st.session_state.green_cache_path = path_g
 if uploaded_game is not None:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    tfile.write(uploaded_game.getbuffer())
-    st.session_state.game_cache_path = tfile.name
+    path_m = os.path.join(base_dir, "cache_game.mp4")
+    with open(path_m, "wb") as f:
+        f.write(uploaded_game.getbuffer())
+    st.session_state.game_cache_path = path_m
 
 if "green_cache_path" in st.session_state and "game_cache_path" in st.session_state:
     try:
@@ -210,10 +205,15 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         fps = cap_green.get(cv2.CAP_PROP_FPS)
                         width = int(cap_green.get(cv2.CAP_PROP_FRAME_WIDTH))
                         height= int(cap_green.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        silent_path = os.path.join(tempfile.gettempdir(), "silent_video.mp4")
+                        
+                        # 核心修改点：改为本地运行根目录路径，防权限和乱码路径穿帮
+                        silent_path = os.path.join(base_dir, "silent_video.mp4")
                         if os.path.exists(silent_path): os.remove(silent_path)
-                        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                        
+                        # 核心修改点：改用 Windows 兼容性最佳的 mp4v 写入器
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         out = cv2.VideoWriter(silent_path, fourcc, fps, (width, height))
+                        
                         last_valid_pts = None
                         history_pts = []
                         while cap_green.isOpened():
@@ -235,7 +235,7 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             if game_clip.audio is not None: audio = game_clip.audio
                         except Exception as e: pass
                         
-                        output_final_path = os.path.join(tempfile.gettempdir(), "final_with_audio.mp4")
+                        output_final_path = os.path.join(base_dir, "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
                         final_clip = VideoFileClip(silent_path)

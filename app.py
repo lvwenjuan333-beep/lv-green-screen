@@ -4,7 +4,19 @@ import numpy as np
 import tempfile
 import os
 import subprocess
-import sys  # 引入系统判断库
+import sys
+
+# ---------- 动态获取 MoviePy 自带的 FFmpeg 路径 ----------
+try:
+    from moviepy.config import get_setting
+    FFMPEG_BINARY = get_setting("FFMPEG_BINARY")
+except Exception:
+    try:
+        from moviepy.video.io.ffmpeg_tools import ffmpeg_merge_video_audio
+        # 如果能导入说明 moviepy 正常，我们尝试退回到默认命令名
+        FFMPEG_BINARY = "ffmpeg"
+    except Exception:
+        FFMPEG_BINARY = "ffmpeg"
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -158,11 +170,10 @@ with col1:
     uploaded_green = st.file_uploader("手持高动态实拍绿幕素材 (MP4/MOV)", type=["mp4", "mov"])
     uploaded_game = st.file_uploader("游戏玩法高帧率录屏 (MP4)", type=["mp4"])
 
-# 基于当前平台自动决定使用临时目录还是当前文件夹
 if sys.platform.startswith('win'):
     base_dir = os.path.dirname(os.path.abspath(__file__))
 else:
-    base_dir = tempfile.gettempdir()  # 云端/Linux 自动使用系统临时区
+    base_dir = tempfile.gettempdir()
 
 if uploaded_green is not None:
     path_g = os.path.join(base_dir, "cache_green.mp4")
@@ -235,8 +246,9 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         output_final_path = os.path.join(base_dir, "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
+                        # 核心防空指针修改：将原先写死的 'ffmpeg' 换成动态读取到的 FFMPEG_BINARY 绝对路径
                         cmd = [
-                            'ffmpeg', '-y',
+                            FFMPEG_BINARY, '-y',
                             '-i', silent_path,
                             '-i', st.session_state.green_cache_path,
                             '-map', '0:v:0',
@@ -248,14 +260,11 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             output_final_path
                         ]
                         
-                        # ---------- 跨平台安全运行修改点 ----------
                         if sys.platform.startswith('win'):
-                            # 如果是 Windows，配置隐藏 CMD 黑窗口参数
                             startupinfo = subprocess.STARTUPINFO()
                             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo, check=True)
                         else:
-                            # 如果是 Linux/Mac 云端，不需要配置 startupinfo
                             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
                         
                         if os.path.exists(silent_path): os.remove(silent_path)

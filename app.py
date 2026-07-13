@@ -4,7 +4,9 @@ import numpy as np
 import tempfile
 import os
 import sys
-from moviepy.editor import VideoFileClip, AudioFileClip  # 引入 MoviePy 核心剪辑对象
+# ---------- 💡 放弃 moviepy.editor，改用现代版本兼容的底层核心路径 ----------
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.audio.io.AudioFileClip import AudioFileClip
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -234,26 +236,22 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         output_final_path = os.path.join(base_dir, "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
-                        # ---------- 💡 重新升级：改用 MoviePy 核心纯 Python 接口进行音轨严格对齐 ----------
+                        # ---------- 💡 使用绝对兼容的显式接口进行音频封装 ----------
                         try:
-                            # 1. 载入刚刚用精确 fps 生成的抠像视频
                             video_clip = VideoFileClip(silent_path)
-                            # 2. 从实拍素材中精准剥离完整的音频流
                             audio_clip = AudioFileClip(st.session_state.green_cache_path)
                             
-                            # 3. 将音频强行绑定给画面，同时限制音频长度与画面完全一致，强制消除Desync
-                            final_clip = video_clip.set_audio(audio_clip)
+                            # 强行校准音画时间轴
+                            final_clip = video_clip.with_audio(audio_clip) if hasattr(video_clip, 'with_audio') else video_clip.set_audio(audio_clip)
                             
-                            # 4. 渲染输出（MoviePy内部会自动规避变帧率带来的累积时间差）
                             final_clip.write_videofile(
                                 output_final_path, 
                                 codec="libx264", 
                                 audio_codec="aac",
                                 fps=fps,
-                                logger=None  # 隐藏多余的日志输出
+                                logger=None
                             )
                             
-                            # 释放内存锁
                             video_clip.close()
                             audio_clip.close()
                             final_clip.close()
@@ -263,7 +261,6 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             if os.path.exists(output_final_path): os.remove(output_final_path)
                             os.rename(silent_path, output_final_path)
                         
-                        # 清理过度产生的临时静音文件
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()

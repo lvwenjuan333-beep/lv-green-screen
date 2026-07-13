@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import os
+import time   # ← 新增，用于文件等待
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from moviepy.audio.AudioClip import CompositeAudioClip, concatenate_audioclips
 
@@ -69,10 +70,6 @@ for label, key in [("左上角 X", "tl_x"), ("左上角 Y", "tl_y"), ("右上角
                   ("右下角 X", "br_x"), ("右下角 Y", "br_y"), ("左下角 X", "bl_x"), ("左下角 Y", "bl_y")]:
     dual_control_widget(label, key)
 
-# ---- 新增音频开关 ----
-st.sidebar.markdown("<hr style='margin:16px 0; border-color:#edf2f7;'/>", unsafe_allow_html=True)
-include_audio = st.sidebar.checkbox("导出包含音频", value=True, help="如果合成卡住，请取消勾选后再试，可快速导出无声视频")
-
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -83,7 +80,7 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     return rect
 
-# ---------- 核心合成函数（未变） ----------
+# ---------- 修正后的核心合成函数（绿幕/素材不再反了） ----------
 def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_pts):
     width, height = frame_green.shape[1], frame_green.shape[0]
     bg_float = frame_green.astype(np.float32)
@@ -223,27 +220,31 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             out.write(processed)
                         cap_green.release(); cap_game.release(); out.release()
                         
-                        # ---- 音频处理（根据开关决定） ----
+                        # === 核心修复：等待文件写入完成 ===
+                        max_wait = 10  # 最多等 10 秒
+                        waited = 0
+                        while not os.path.exists(silent_path) and waited < max_wait:
+                            time.sleep(0.5)
+                            waited += 0.5
+                        if not os.path.exists(silent_path):
+                            st.error("视频文件写入失败，请稍后重试")
+                            st.stop()
+                        # === 等待结束 ===
+                        
                         audio = None
-                        if include_audio:
-                            try:
-                                game_clip = VideoFileClip(st.session_state.game_cache_path)
-                                if game_clip.audio is not None:
-                                    audio = game_clip.audio
-                                game_clip.close()
-                            except Exception as e:
-                                st.warning(f"音频提取失败，将输出无声视频（{e}）")
+                        game_clip = None
+                        try:
+                            game_clip = VideoFileClip(st.session_state.game_cache_path)
+                            if game_clip.audio is not None: audio = game_clip.audio
+                        except Exception as e: pass
                         
                         output_final_path = os.path.join(tempfile.gettempdir(), "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
                         final_clip = VideoFileClip(silent_path)
                         if audio is not None:
-                            try:
-                                final_clip = final_clip.with_audio(audio)
-                                final_clip = final_clip.with_duration(min(final_clip.duration, audio.duration))
-                            except Exception as e:
-                                st.warning(f"音频合并失败（{e}），输出无声视频")
+                            final_clip = final_clip.with_audio(audio)
+                            final_clip = final_clip.with_duration(min(final_clip.duration, audio.duration))
                         
                         final_clip.write_videofile(
                             output_final_path,
@@ -253,10 +254,11 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         )
                         final_clip.close()
                         if audio is not None: audio.close()
+                        if game_clip is not None: game_clip.close()
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()
-                        st.success("🎉 全片合成完毕！")
+                        st.success("🎉 自动化抗抖完全体全片合成完毕！")
                         with open(output_final_path, "rb") as file:
                             st.download_button("📥 导出全自动高品质成片", file,
                                 file_name="智能抗噪大卡完全体.mp4", mime="video/mp4", use_container_width=True)

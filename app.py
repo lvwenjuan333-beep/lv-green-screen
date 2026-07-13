@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import os
+import subprocess
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 # ---------- 页面配置 ----------
@@ -80,7 +81,6 @@ def order_points(pts):
 
 def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_pts):
     width, height = frame_green.shape[1], frame_green.shape[0]
-    bg_float = frame_green.astype(np.float32)
     
     hsv = cv2.cvtColor(frame_green, cv2.COLOR_BGR2HSV)
     lower_green = np.array([35, 40, 40])
@@ -158,7 +158,6 @@ with col1:
     uploaded_green = st.file_uploader("手持高动态实拍绿幕素材 (MP4/MOV)", type=["mp4", "mov"])
     uploaded_game = st.file_uploader("游戏玩法高帧率录屏 (MP4)", type=["mp4"])
 
-# 基于当前目录创建安全的临时文件路径
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 if uploaded_green is not None:
@@ -202,15 +201,17 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                     with st.spinner("影视级抗噪自适应算法深度处理中，请稍候..."):
                         cap_green = cv2.VideoCapture(st.session_state.green_cache_path)
                         cap_game  = cv2.VideoCapture(st.session_state.game_cache_path)
+                        
+                        # 核心防对齐修改点：这里必须获取最精准的原片实际帧率
                         fps = cap_green.get(cv2.CAP_PROP_FPS)
+                        if fps < 10 or fps > 120: fps = 30.0  # 异常安全保护
+                        
                         width = int(cap_green.get(cv2.CAP_PROP_FRAME_WIDTH))
                         height= int(cap_green.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         
-                        # 核心修改点：改为本地运行根目录路径，防权限和乱码路径穿帮
                         silent_path = os.path.join(base_dir, "silent_video.mp4")
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
-                        # 核心修改点：改用 Windows 兼容性最佳的 mp4v 写入器
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         out = cv2.VideoWriter(silent_path, fourcc, fps, (width, height))
                         
@@ -228,37 +229,45 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             out.write(processed)
                         cap_green.release(); cap_game.release(); out.release()
                         
-                        audio = None
-                        game_clip = None
-                        try:
-                            game_clip = VideoFileClip(st.session_state.game_cache_path)
-                            if game_clip.audio is not None: audio = game_clip.audio
-                        except Exception as e: pass
-                        
+                        # ---------- 核心安全对齐升级：FFmpeg 无损底层封装合并 ----------
                         output_final_path = os.path.join(base_dir, "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
-                        final_clip = VideoFileClip(silent_path)
-                        if audio is not None:
-                            final_clip = final_clip.with_audio(audio)
-                            final_clip = final_clip.with_duration(min(final_clip.duration, audio.duration))
+                        # 直接调用系统的 ffmpeg (moviepy自带)，无损抽取绿幕原素材的音频，并强行和新生成的视频轨道贴合
+                        # -shortest 参数可以保证音视频长度一致，防止尾部音画拉长。
+                        cmd = [
+                            'ffmpeg', '-y',
+                            '-i', silent_path,                             # 输入1：抠像完的无声视频
+                            '-i', st.session_state.green_cache_path,       # 输入2：绿幕原素材（带声音）
+                            '-map', '0:v:0',                               # 取输入1的视频轨
+                            '-map', '1:a:0',                               # 取输入2的音频轨
+                            '-c:v', 'libx264',                             # 重新压制视频为标准H264
+                            '-pix_fmt', 'yuv420p',                         # 确保手机/网页完美兼容
+                            '-c:a', 'aac',                                 # 音频转为标准AAC
+                            '-shortest',                                   # 哪边短以哪边为准截止，防止音画异步
+                            output_final_path
+                        ]
                         
-                        final_clip.write_videofile(
-                            output_final_path,
-                            codec='libx264',
-                            audio_codec='aac' if audio is not None else None,
-                            logger=None
-                        )
-                        final_clip.close()
-                        if audio is not None: audio.close()
-                        if game_clip is not None: game_clip.close()
+                        try:
+                            # 隐藏控制台黑窗口运行
+                            startupinfo = subprocess.STARTUPINFO()
+                            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo, check=True)
+                        except Exception as ffmpeg_err:
+                            # 备用轻量级合并（防止极个别素材没有音频轨导致FFmpeg报错）
+                            cmd_fallback = [
+                                'ffmpeg', '-y', '-i', silent_path, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', output_final_path
+                            ]
+                            subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+                        
+                        # 清理过度临时文件
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()
-                        st.success("🎉 自动化抗抖完全体全片合成完毕！")
+                        st.success("🎉 全自动【音画强同步】完全体全片合成完毕！")
                         with open(output_final_path, "rb") as file:
                             st.download_button("📥 导出全自动高品质成片", file,
-                                file_name="智能抗噪大卡完全体.mp4", mime="video/mp4", use_container_width=True)
+                                file_name="智能抗噪同步完全体.mp4", mime="video/mp4", use_container_width=True)
     except Exception as e:
         st.error(f"视频处理异常：{e}")
 else:

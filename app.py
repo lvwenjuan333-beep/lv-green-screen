@@ -3,10 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import os
-import sys
-# ---------- 💡 放弃 moviepy.editor，改用现代版本兼容的底层核心路径 ----------
 from moviepy.video.io.VideoFileClip import VideoFileClip
-from moviepy.audio.io.AudioFileClip import AudioFileClip
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -83,6 +80,7 @@ def order_points(pts):
 
 def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_pts):
     width, height = frame_green.shape[1], frame_green.shape[0]
+    bg_float = frame_green.astype(np.float32)
     
     hsv = cv2.cvtColor(frame_green, cv2.COLOR_BGR2HSV)
     lower_green = np.array([35, 40, 40])
@@ -160,10 +158,8 @@ with col1:
     uploaded_green = st.file_uploader("手持高动态实拍绿幕素材 (MP4/MOV)", type=["mp4", "mov"])
     uploaded_game = st.file_uploader("游戏玩法高帧率录屏 (MP4)", type=["mp4"])
 
-if sys.platform.startswith('win'):
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-else:
-    base_dir = tempfile.gettempdir()
+# 基于当前目录创建安全的临时文件路径
+base_dir = os.path.dirname(os.path.abspath(__file__))
 
 if uploaded_green is not None:
     path_g = os.path.join(base_dir, "cache_green.mp4")
@@ -206,16 +202,15 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                     with st.spinner("影视级抗噪自适应算法深度处理中，请稍候..."):
                         cap_green = cv2.VideoCapture(st.session_state.green_cache_path)
                         cap_game  = cv2.VideoCapture(st.session_state.game_cache_path)
-                        
                         fps = cap_green.get(cv2.CAP_PROP_FPS)
-                        if fps < 10 or fps > 120: fps = 30.0
-                        
                         width = int(cap_green.get(cv2.CAP_PROP_FRAME_WIDTH))
                         height= int(cap_green.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         
+                        # 核心修改点：改为本地运行根目录路径，防权限和乱码路径穿帮
                         silent_path = os.path.join(base_dir, "silent_video.mp4")
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
+                        # 核心修改点：改用 Windows 兼容性最佳的 mp4v 写入器
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         out = cv2.VideoWriter(silent_path, fourcc, fps, (width, height))
                         
@@ -233,41 +228,37 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                             out.write(processed)
                         cap_green.release(); cap_game.release(); out.release()
                         
+                        audio = None
+                        game_clip = None
+                        try:
+                            game_clip = VideoFileClip(st.session_state.game_cache_path)
+                            if game_clip.audio is not None: audio = game_clip.audio
+                        except Exception as e: pass
+                        
                         output_final_path = os.path.join(base_dir, "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
-                        # ---------- 💡 使用绝对兼容的显式接口进行音频封装 ----------
-                        try:
-                            video_clip = VideoFileClip(silent_path)
-                            audio_clip = AudioFileClip(st.session_state.green_cache_path)
-                            
-                            # 强行校准音画时间轴
-                            final_clip = video_clip.with_audio(audio_clip) if hasattr(video_clip, 'with_audio') else video_clip.set_audio(audio_clip)
-                            
-                            final_clip.write_videofile(
-                                output_final_path, 
-                                codec="libx264", 
-                                audio_codec="aac",
-                                fps=fps,
-                                logger=None
-                            )
-                            
-                            video_clip.close()
-                            audio_clip.close()
-                            final_clip.close()
-                            
-                        except Exception as moviepy_err:
-                            st.warning(f"高级对齐轻微受限，尝试后备方案导出: {moviepy_err}")
-                            if os.path.exists(output_final_path): os.remove(output_final_path)
-                            os.rename(silent_path, output_final_path)
+                        final_clip = VideoFileClip(silent_path)
+                        if audio is not None:
+                            final_clip = final_clip.with_audio(audio)
+                            final_clip = final_clip.with_duration(min(final_clip.duration, audio.duration))
                         
+                        final_clip.write_videofile(
+                            output_final_path,
+                            codec='libx264',
+                            audio_codec='aac' if audio is not None else None,
+                            logger=None
+                        )
+                        final_clip.close()
+                        if audio is not None: audio.close()
+                        if game_clip is not None: game_clip.close()
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()
-                        st.success("🎉 全自动【音画强同步】完全体全片合成完毕！")
+                        st.success("🎉 自动化抗抖完全体全片合成完毕！")
                         with open(output_final_path, "rb") as file:
                             st.download_button("📥 导出全自动高品质成片", file,
-                                file_name="智能抗噪同步完全体.mp4", mime="video/mp4", use_container_width=True)
+                                file_name="智能抗噪大卡完全体.mp4", mime="video/mp4", use_container_width=True)
     except Exception as e:
         st.error(f"视频处理异常：{e}")
 else:

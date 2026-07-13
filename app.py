@@ -3,9 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import os
-from moviepy.video.io.VideoFileClip import VideoFileClip
-from moviepy.video.VideoClip import VideoClip
-from moviepy.audio.AudioClip import CompositeAudioClip, concatenate_audioclips
+from moviepy.editor import ImageSequenceClip, VideoFileClip, CompositeAudioClip, concatenate_audioclips
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -153,36 +151,6 @@ def process_core_frame_master(frame_green, frame_game, last_valid_pts, history_p
         
     return frame_green, last_valid_pts, history_pts
 
-# ---------- 自定义帧生成器（内存中生成视频帧） ----------
-def make_frame_function(green_path, game_path, pts, soft_val, spill_val):
-    """返回一个帧生成函数，供 VideoClip 使用"""
-    cap_green = cv2.VideoCapture(green_path)
-    cap_game = cv2.VideoCapture(game_path)
-    fps = cap_green.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap_green.get(cv2.CAP_PROP_FRAME_COUNT))
-    game_fps = cap_game.get(cv2.CAP_PROP_FPS)
-    game_total = int(cap_game.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    def frame_generator(t):
-        frame_idx = int(t * fps)
-        if frame_idx >= total_frames:
-            frame_idx = total_frames - 1
-        cap_green.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret_g, frame_g = cap_green.read()
-        if not ret_g:
-            return np.zeros((1080, 1920, 3), dtype=np.uint8)
-        
-        game_idx = int((frame_idx / fps) * game_fps) % game_total if game_total else 0
-        cap_game.set(cv2.CAP_PROP_POS_FRAMES, game_idx)
-        ret_m, frame_m = cap_game.read()
-        if not ret_m or frame_m is None:
-            frame_m = np.zeros_like(frame_g)
-        
-        processed, _, _ = process_core_frame_master(frame_g, frame_m, None, [])
-        return cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-    
-    return frame_generator, fps, total_frames
-
 # ---------- 主界面 ----------
 col1, col2 = st.columns([5, 5], gap="large")
 with col1:
@@ -227,23 +195,53 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                 st.markdown('<div class="section-header">3. 无损级渲染导出管线</div>', unsafe_allow_html=True)
                 if st.button("🔥 开始全片大卡高规格合成", type="primary", use_container_width=True):
                     with st.spinner("影视级抗噪自适应算法深度处理中，请稍候..."):
-                        # 自定义帧生成器
-                        frame_gen, fps, total_frames = make_frame_function(
-                            st.session_state.green_cache_path,
-                            st.session_state.game_cache_path,
-                            None, soft_falloff, spill_suppress
-                        )
-                        duration = total_frames / fps
-                        video_clip = VideoClip(frame_gen, duration=duration)
+                        cap_green = cv2.VideoCapture(st.session_state.green_cache_path)
+                        cap_game  = cv2.VideoCapture(st.session_state.game_cache_path)
+                        fps = cap_green.get(cv2.CAP_PROP_FPS)
+                        width = int(cap_green.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        height= int(cap_green.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         
-                        # 音频处理
+                        last_valid_pts = None
+                        history_pts = []
+                        frames = []
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        frame_count = 0
+                        while cap_green.isOpened():
+                            ret_g, frame_g = cap_green.read()
+                            if not ret_g: break
+                            ret_m, frame_m = cap_game.read()
+                            if not ret_m:
+                                cap_game.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                                ret_m, frame_m = cap_game.read()
+                            if frame_m is None: frame_m = np.zeros_like(frame_g)
+                            processed, last_valid_pts, history_pts = process_core_frame_master(frame_g, frame_m, last_valid_pts, history_pts)
+                            # 转换为RGB
+                            processed_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+                            frames.append(processed_rgb)
+                            frame_count += 1
+                            if frame_count % 10 == 0:
+                                progress_bar.progress(frame_count / total_frames)
+                                status_text.text(f"正在合成... {int(frame_count / total_frames * 100)}%")
+                        cap_green.release(); cap_game.release()
+                        
+                        progress_bar.progress(1.0)
+                        status_text.text("合成完成，正在生成视频文件...")
+                        
+                        # 直接从帧列表生成视频（内存操作）
+                        video_clip = ImageSequenceClip(frames, fps=fps)
+                        
+                        # 音频处理（静默跳过错误）
                         audio = None
-                        game_clip = None
                         try:
                             game_clip = VideoFileClip(st.session_state.game_cache_path)
                             if game_clip.audio is not None:
                                 audio = game_clip.audio
-                        except Exception as e: pass
+                            else:
+                                game_clip.close()
+                        except:
+                            pass
                         
                         output_final_path = os.path.join(tempfile.gettempdir(), "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
@@ -260,7 +258,9 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         )
                         video_clip.close()
                         if audio is not None: audio.close()
-                        if game_clip is not None: game_clip.close()
+                        
+                        progress_bar.empty()
+                        status_text.empty()
                         
                         st.balloons()
                         st.success("🎉 自动化抗抖完全体全片合成完毕！")

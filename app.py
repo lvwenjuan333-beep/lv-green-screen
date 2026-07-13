@@ -3,20 +3,8 @@ import cv2
 import numpy as np
 import tempfile
 import os
-import subprocess
 import sys
-
-# ---------- 动态获取 MoviePy 自带的 FFmpeg 路径 ----------
-try:
-    from moviepy.config import get_setting
-    FFMPEG_BINARY = get_setting("FFMPEG_BINARY")
-except Exception:
-    try:
-        from moviepy.video.io.ffmpeg_tools import ffmpeg_merge_video_audio
-        # 如果能导入说明 moviepy 正常，我们尝试退回到默认命令名
-        FFMPEG_BINARY = "ffmpeg"
-    except Exception:
-        FFMPEG_BINARY = "ffmpeg"
+from moviepy.editor import VideoFileClip, AudioFileClip  # 引入 MoviePy 核心剪辑对象
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -246,27 +234,36 @@ if "green_cache_path" in st.session_state and "game_cache_path" in st.session_st
                         output_final_path = os.path.join(base_dir, "final_with_audio.mp4")
                         if os.path.exists(output_final_path): os.remove(output_final_path)
                         
-                        # 核心防空指针修改：将原先写死的 'ffmpeg' 换成动态读取到的 FFMPEG_BINARY 绝对路径
-                        cmd = [
-                            FFMPEG_BINARY, '-y',
-                            '-i', silent_path,
-                            '-i', st.session_state.green_cache_path,
-                            '-map', '0:v:0',
-                            '-map', '1:a:0',
-                            '-c:v', 'libx264',
-                            '-pix_fmt', 'yuv420p',
-                            '-c:a', 'aac',
-                            '-shortest',
-                            output_final_path
-                        ]
+                        # ---------- 💡 重新升级：改用 MoviePy 核心纯 Python 接口进行音轨严格对齐 ----------
+                        try:
+                            # 1. 载入刚刚用精确 fps 生成的抠像视频
+                            video_clip = VideoFileClip(silent_path)
+                            # 2. 从实拍素材中精准剥离完整的音频流
+                            audio_clip = AudioFileClip(st.session_state.green_cache_path)
+                            
+                            # 3. 将音频强行绑定给画面，同时限制音频长度与画面完全一致，强制消除Desync
+                            final_clip = video_clip.set_audio(audio_clip)
+                            
+                            # 4. 渲染输出（MoviePy内部会自动规避变帧率带来的累积时间差）
+                            final_clip.write_videofile(
+                                output_final_path, 
+                                codec="libx264", 
+                                audio_codec="aac",
+                                fps=fps,
+                                logger=None  # 隐藏多余的日志输出
+                            )
+                            
+                            # 释放内存锁
+                            video_clip.close()
+                            audio_clip.close()
+                            final_clip.close()
+                            
+                        except Exception as moviepy_err:
+                            st.warning(f"高级对齐轻微受限，尝试后备方案导出: {moviepy_err}")
+                            if os.path.exists(output_final_path): os.remove(output_final_path)
+                            os.rename(silent_path, output_final_path)
                         
-                        if sys.platform.startswith('win'):
-                            startupinfo = subprocess.STARTUPINFO()
-                            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo, check=True)
-                        else:
-                            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                        
+                        # 清理过度产生的临时静音文件
                         if os.path.exists(silent_path): os.remove(silent_path)
                         
                         st.balloons()
